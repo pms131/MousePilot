@@ -1,0 +1,165 @@
+#!/bin/zsh
+# mousepilotctl: manage MousePilot.app (wheel over a browser's tab strip switches tabs).
+# Usage: mousepilotctl status|on|off|restart|list|add <browser> [height | top bottom]
+#                    |remove <browser>|height [pt]|debug on|off|log [n]|uninstall
+# <browser>: brave, whale, chrome, safari, edge, firefox, arc, vivaldi, opera, or a bundle ID.
+# The app watches the config file, so add/remove apply immediately.
+set -u
+ID=com.pms.mousepilot
+APP=/Applications/MousePilot.app
+BIN=$APP/Contents/MacOS/mousepilot
+LOG=~/Library/Logs/mousepilot.log
+CONF=~/.config/mousepilot/browsers
+
+# name → bundle ID, and the default tab-strip band for browsers whose strip is not at
+# the very top of the window
+typeset -A KNOWN=(
+  brave com.brave.Browser   whale com.naver.Whale        chrome com.google.Chrome
+  safari com.apple.Safari   edge com.microsoft.edgemac   firefox org.mozilla.firefox
+  arc company.thebrowser.Browser   vivaldi com.vivaldi.Vivaldi   opera com.operasoftware.Opera
+)
+typeset -A DEFAULT_BAND=( com.apple.Safari "50 88" )
+
+bundle_id() {
+  [[ -n ${1:-} ]] || return 1
+  if (( ${+KNOWN[${1:l}]} )); then echo ${KNOWN[${1:l}]}
+  elif [[ $1 == *.* ]]; then echo $1
+  else return 1
+  fi
+}
+installed() { [[ -n $(mdfind "kMDItemCFBundleIdentifier == '$1'" 2>/dev/null | head -1) ]]; }
+# Version of the installed app, read from its Info.plist (older apps have no CLI flags,
+# so their binary must not be run).
+app_version() { /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" $APP/Contents/Info.plist 2>/dev/null; }
+# Builds that answer command-line options say so in their Info.plist.
+has_cli() { [[ $(/usr/libexec/PlistBuddy -c "Print :MousePilotCommandLine" $APP/Contents/Info.plist 2>/dev/null) == true ]]; }
+# Runs the app binary with a command-line option and gives up after 3 s: a build that
+# does not know the option would start a second instance instead of answering.
+run_cli() {
+  has_cli || return 1
+  $BIN "$@" &
+  local pid=$! i
+  for i in {1..30}; do kill -0 $pid 2>/dev/null || { wait $pid; return; }; sleep 0.1; done
+  kill $pid 2>/dev/null
+  return 1
+}
+# Fallback when Spotlight cannot answer: look through the Applications folders.
+installed_slow() {
+  local a
+  for a in /Applications/*.app ~/Applications/*.app(N); do
+    [[ $(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$a/Contents/Info.plist" 2>/dev/null) == $1 ]] && return 0
+  done
+  return 1
+}
+browsers() {
+  if [[ ! -f $CONF ]]; then echo "(설정 파일 없음: 앱을 처음 실행하면 설치된 브라우저로 만들어집니다)"; return; fi
+  grep -vE '^[[:space:]]*(#|$)' $CONF || echo "(설정 파일에 브라우저 없음: 모두 꺼짐)"
+}
+running() { pgrep -qx mousepilot; }
+tapped()  { [[ $(grep -E "event tap installed|waiting for Accessibility" $LOG 2>/dev/null | tail -1) == *"event tap installed"* ]]; }
+
+# Quits MousePilot if it runs; fails if it is still running afterwards.
+stop() {
+  running || return 0
+  osascript -e "tell application id \"$ID\" to quit" >/dev/null 2>&1
+  for i in {1..25}; do running || return 0; sleep 0.2; done
+  echo "MousePilot이 종료되지 않았습니다 (메뉴바 아이콘 → MousePilot 종료로 직접 꺼 주세요)." >&2
+  return 1
+}
+start() {
+  running && return 0
+  [[ -d $APP ]] || { echo "설치 안 됨 ($APP 없음)" >&2; return 1; }
+  open $APP; sleep 2
+}
+
+status() {
+  [[ -d $APP ]] || { echo "설치 안 됨 ($APP 없음)"; return; }
+  local pz=; [[ $(defaults read $ID paused 2>/dev/null) == 1 ]] && pz=" (메뉴바에서 일시정지됨)"
+  if running; then
+    if tapped; then echo "상태: 켜짐$pz"; else echo "상태: 실행 중이지만 손쉬운 사용 권한 대기 중"; fi
+  else
+    echo "상태: 꺼짐"
+  fi
+  echo "버전: $(app_version)"
+  has_cli && echo "로그인 시 자동 실행: $(run_cli --login-item-status 2>/dev/null)"
+  echo "기본 탭바 높이: $(defaults read $ID stripHeight 2>/dev/null || echo 40)pt"
+  local dbg=끔; [[ $(defaults read $ID debug 2>/dev/null) == 1 ]] && dbg=켬
+  echo "디버그 로그: $dbg ($LOG)"
+  echo "적용 브라우저 (번들 ID [탭바 높이 | 시작 끝 pt]):"; browsers | sed 's/^/  /'
+}
+
+edit_conf() {  # $1 = bundle id to drop, $2 = line to add (optional)
+  mkdir -p ${CONF:h}
+  # A missing file means "every installed browser": write that list first so the other
+  # browsers stay enabled. The app writes it itself (same logic as on first launch).
+  [[ ! -f $CONF ]] && run_cli --write-default-config
+  if [[ ! -f $CONF ]]; then
+    {
+      echo "# MousePilot: 적용할 브라우저 (한 줄에 하나)"
+      echo "# <번들 ID> [탭바 높이 pt | 탭바 시작 pt 탭바 끝 pt]  — 창 맨 위에서 잰 탭바 영역, 기본 0 40"
+      local b
+      for b in com.brave.Browser com.naver.Whale com.google.Chrome com.apple.Safari com.microsoft.edgemac \
+               org.mozilla.firefox company.thebrowser.Browser com.vivaldi.Vivaldi com.operasoftware.Opera; do
+        if installed $b || installed_slow $b; then
+          echo "$b${DEFAULT_BAND[$b]:+ ${DEFAULT_BAND[$b]}}"
+        fi
+      done
+    } > $CONF
+  fi
+  # Drop the browser's line (fields split on any whitespace, comments ignored, any case),
+  # add the new one, and replace the file in one rename so the app never reads half of it.
+  {
+    awk -v id="${1:l}" '{ line = $0; sub(/#.*/, "", line); split(line, f, /[ \t\r]+/); first = (f[1] == "" ? f[2] : f[1]);
+                          if (tolower(first) != id) print $0 }' $CONF || return 1
+    if [[ -n ${2:-} ]]; then echo $2; fi
+  } > $CONF.tmp && mv $CONF.tmp $CONF
+}
+
+case ${1:-status} in
+  status)  status ;;
+  on)      start && status ;;
+  off)     stop && status ;;
+  restart) stop && start && status ;;
+  list)    browsers ;;
+  add)
+    id=$(bundle_id ${2:-}) || { echo "브라우저 이름이나 번들 ID를 지정하세요 (예: whale, com.naver.Whale)"; exit 1; }
+    num='^[0-9]+([.][0-9]+)?$'
+    if [[ -n ${3:-} && ! $3 =~ $num ]] || [[ -n ${4:-} && ! $4 =~ $num ]]; then
+      echo "탭바 값은 숫자(pt)로 지정하세요: 높이 하나, 또는 시작 끝 두 개"; exit 1
+    fi
+    if [[ -n ${4:-} ]] && (( $4 <= $3 )); then echo "탭바 끝($4)은 시작($3)보다 커야 합니다"; exit 1; fi
+    if [[ -n ${3:-} && -z ${4:-} ]] && (( $3 <= 0 )); then echo "탭바 높이는 0보다 커야 합니다"; exit 1; fi
+    band=${3:+$3${4:+ $4}}
+    [[ -z $band ]] && band=${DEFAULT_BAND[$id]:-}
+    edit_conf $id "$id${band:+ $band}"
+    if [[ -z ${3:-} ]]; then desc=${band:+"탭바 ${band%% *}~${band##* }pt"}
+    elif [[ -z ${4:-} ]]; then desc="탭바 높이 ${3}pt"
+    else desc="탭바 ${3}~${4}pt"; fi
+    echo "추가됨: $id${desc:+ ($desc)}"; browsers ;;
+  remove)
+    id=$(bundle_id ${2:-}) || { echo "브라우저 이름이나 번들 ID를 지정하세요"; exit 1; }
+    edit_conf $id; echo "제거됨: $id"; browsers ;;
+  height)
+    if [[ -z ${2:-} ]]; then defaults read $ID stripHeight 2>/dev/null || echo 40; exit; fi
+    [[ $2 == <-> ]] || { echo "높이는 숫자(pt)로 지정하세요"; exit 1; }
+    defaults write $ID stripHeight -float $2; stop && start && status ;;
+  debug)
+    case ${2:-} in
+      on)  defaults write $ID debug -bool true ;;
+      off) defaults delete $ID debug 2>/dev/null ;;
+      *)   echo "사용법: mousepilotctl debug on|off"; exit 1 ;;
+    esac
+    : > $LOG; stop && start && status ;;
+  log) tail -n ${2:-30} $LOG ;;
+  uninstall)
+    stop || exit 1
+    # The login item is registered by the app itself; only the app can remove it.
+    run_cli --unregister-login-item
+    defaults delete $ID 2>/dev/null
+    for f in $APP $LOG ${CONF:h}; do
+      [[ -e $f ]] && osascript -e "tell application \"Finder\" to delete (POSIX file \"$f\" as alias)" >/dev/null && echo "휴지통으로 이동: $f"
+    done
+    echo "남은 일: 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용 / 자동화에서 MousePilot 항목을 지우세요."
+    echo "(소스·빌드 스크립트는 남겨둡니다: ~/Projects/MousePilot)" ;;
+  *) echo "사용법: mousepilotctl status|on|off|restart|list|add <browser> [height | top bottom]|remove <browser>|height [pt]|debug on|off|log [n]|uninstall"; exit 1 ;;
+esac
