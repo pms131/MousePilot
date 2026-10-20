@@ -121,11 +121,31 @@ let wholePage: Int32 = 10_000_000   // pixels: more than any page; the browser s
 /// How far below a window's top edge its page may start (tab strip, toolbar, bookmarks bar).
 let pageTop: CGFloat = 120
 
-/// Where the pointer is just after a gesture. The session's location stays at the gesture's
-/// start until the pointer moves again — the drags in between were swallowed, never reaching
-/// it — and the pointer is then still where the button was released.
-func pointerAfterGesture(session: CGPoint, start: CGPoint, release: CGPoint) -> CGPoint {
-    hypot(session.x - start.x, session.y - start.y) < 0.5 ? release : session
+/// Where a gesture ended: the pointer, and the session's location at that moment, which the
+/// gesture's swallowed events never moved — it is where the last event that went through left
+/// it: the gesture's start, or the start of an earlier gesture made without moving between —
+/// and how many gestures had begun by then.
+struct GestureEnd { let pointer: CGPoint; let session: CGPoint?; let gesturesBegun: Int }
+
+/// Right-button gestures begun so far (event tap thread writes, the actions read).
+let gesturesBegun = Locked(0)
+
+/// Where a gesture's wheel event goes, which is where the pointer is just after the gesture:
+/// where the button was released while the session's location is still what it was then
+/// (the pointer has not moved since), the session's location once it has. Nil — the pointer
+/// is not known, and the keys go instead — when a button is held (a drag or another gesture
+/// under way), when a later gesture has begun (its swallowed events moved the pointer unseen
+/// too: an action run late), or when the session's location could not be read.
+func wheelPoint(session: CGPoint?, end: GestureEnd, gesturesBegun begun: Int, buttonHeld: Bool) -> CGPoint? {
+    guard !buttonHeld, begun == end.gesturesBegun, let session, let then = end.session else { return nil }
+    return hypot(session.x - then.x, session.y - then.y) < 0.5 ? end.pointer : session
+}
+
+/// Whether a mouse button is held: a drag or another gesture under way, whose pointer moves
+/// the session has not seen (a gesture's are swallowed) — a posted wheel event would pull
+/// the pointer back to where the session last saw it.
+func mouseButtonHeld() -> Bool {
+    [CGMouseButton.left, .right, .center].contains { CGEventSource.buttonState(.hidSystemState, button: $0) }
 }
 
 /// Whether a wheel event at `p` goes to the page of `window` rather than to its toolbars.
@@ -483,6 +503,7 @@ func startGesture(at p: CGPoint, flags: CGEventFlags, press: Int64) -> Gesture? 
     guard let hit, let browser = s.browsers[hit.pid] else { return nil }
     beginDrawing(at: p, window: hit.window, stroke: s.gestureStroke, title: s.gestureTitle)
     refreshGestureMap()   // for the next gesture: the file is never read on this thread
+    gesturesBegun.update { $0 += 1 }
     return Gesture(tracker: GestureTracker(at: p), hit: hit, browser: browser, focused: isFocusedWindow(hit, s),
                    map: currentGestureMap(), flags: flags, start: p, press: press)
 }
@@ -507,7 +528,9 @@ func finish(_ g: Gesture, at p: CGPoint) {
         log("gesture \(g.tracker.code ?? "(three strokes)") -> \(action.rawValue) on \(g.browser.bundleID) "
             + "window \(g.hit.windowID)\(g.focused ? "" : " (not focused)")")
     }
-    if action != .none { gestureActions.perform(action, g, releasedAt: p) }
+    guard action != .none else { return }
+    gestureActions.perform(action, g, end: GestureEnd(pointer: p, session: CGEvent(source: nil)?.location,
+                                                      gesturesBegun: gesturesBegun.get()))
 }
 
 /// Where a right click without a stroke goes back: the release point, so the cursor does
@@ -519,6 +542,7 @@ func clickPoint(_ g: Gesture, release p: CGPoint, _ s: State) -> CGPoint {
 #if SELFTEST
 var repostedClicks: [CGPoint] = []            // what would have been handed back
 var performedActions: [GestureAction] = []    // what would have run
+var performedEnds: [GestureEnd] = []          // …and where its gesture ended
 #endif
 
 /// The browser gets its right click back; its context menu opens then. Tagged so the tap
@@ -546,9 +570,10 @@ final class GestureActions {
     private var restoreFrames: [CGWindowID: CGRect] = [:]   // queue only: frames before "maximize"
     private let prompts = Locked(0)   // Automation prompts answered so far
 
-    func perform(_ action: GestureAction, _ g: Gesture, releasedAt release: CGPoint) {
+    func perform(_ action: GestureAction, _ g: Gesture, end: GestureEnd) {
         #if SELFTEST
         performedActions.append(action)   // self-tests never act on a real window
+        performedEnds.append(end)
         #else
         let queued = prompts.get(), made = uptime()
         queue.async {
@@ -557,12 +582,12 @@ final class GestureActions {
                 if debug { log("gesture: \(action.rawValue) made during the permission prompt; dropped") }
                 return
             }
-            self.run(action, g, release: release, made: made)
+            self.run(action, g, end: end, made: made)
         }
         #endif
     }
 
-    private func run(_ action: GestureAction, _ g: Gesture, release: CGPoint, made: TimeInterval) {
+    private func run(_ action: GestureAction, _ g: Gesture, end: GestureEnd, made: TimeInterval) {
         switch action {
         case .none:
             return
@@ -583,7 +608,7 @@ final class GestureActions {
             return
         }
         if let delta = wheelDelta(action, windowHeight: g.hit.window.height),
-           scrollPage(g.hit, by: delta, start: g.start, release: release) { return }
+           scrollPage(g.hit, by: delta, end: end) { return }
         // Through the browser's menu when it has the command: a page cannot take a menu
         // command the way it takes a shortcut (⌘[ is "decrease indent" in an editor).
         if !goesAsKeys(chord, kind: g.browser.kind), pressMenuItem(g.hit, chord: chord, made: made) { return }
@@ -597,15 +622,16 @@ final class GestureActions {
     }
 
     /// One wheel event at the pointer, when it is over the page of the gesture's window —
-    /// looked at afresh, as the pointer may have moved on; false otherwise (the keys go then).
-    /// WindowServer moves the pointer to a posted scroll event's location, so that must be
-    /// where the pointer really is (see pointerAfterGesture), read just before posting.
-    private func scrollPage(_ hit: Hit, by delta: Int32, start: CGPoint, release: CGPoint) -> Bool {
-        guard onPage(release, window: hit.window) else { return false }
+    /// looked at afresh, as the pointer may have moved on — and where the pointer is is known
+    /// (see wheelPoint); false otherwise, and the keys go. WindowServer moves the pointer to a
+    /// posted scroll event's location, so that must be where the pointer really is, read just
+    /// before posting.
+    private func scrollPage(_ hit: Hit, by delta: Int32, end: GestureEnd) -> Bool {
+        guard onPage(end.pointer, window: hit.window) else { return false }
         refreshWindows()   // ~2 ms: before the pointer is read
-        guard let session = CGEvent(source: nil)?.location else { return false }
-        let p = pointerAfterGesture(session: session, start: start, release: release)
-        guard onPage(p, window: hit.window), gestureTarget(p, state.get())?.windowID == hit.windowID,
+        guard let p = wheelPoint(session: CGEvent(source: nil)?.location, end: end,
+                                 gesturesBegun: gesturesBegun.get(), buttonHeld: mouseButtonHeld()),
+              onPage(p, window: hit.window), gestureTarget(p, state.get())?.windowID == hit.windowID,
               let e = CGEvent(scrollWheelEvent2Source: CGEventSource(stateID: .hidSystemState), units: .pixel,
                               wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) else { return false }
         e.location = p

@@ -507,6 +507,7 @@ private func testGestureLifecycle() {
     check(!dragTapOn, "right drags do not reach MousePilot before a gesture")
     check(handleRightMouse(.rightMouseDown, event(.rightMouseDown, 500, 500, press: 7)), "a right press on Brave starts a gesture")
     check(dragTapOn, "the drags come to MousePilot while the gesture is under way")
+    let begun = gesturesBegun.get()
     for y in stride(from: CGFloat(504), through: 560, by: 4) { _ = handleRightMouse(.rightMouseDragged, event(.rightMouseDragged, 500, y, press: 7)) }
     check(activeGesture?.tracker.code == "D" && gestureDrawing.get().visible, "the stroke is recognized and drawn")
     state.update { $0.tapOn = false }
@@ -518,6 +519,7 @@ private func testGestureLifecycle() {
           "turning the right-button tap off ends the gesture, its drawing and the drags")
     state.update { $0.buttonTapOn = true }
     check(handleRightMouse(.rightMouseDown, event(.rightMouseDown, 500, 500, press: 8)), "next press starts again")
+    check(gesturesBegun.get() == begun + 1, "each gesture begun is counted (an action run late can tell)")
     check(!handleRightMouse(.rightMouseUp, event(.rightMouseUp, 500, 500, press: 9)) && activeGesture == nil && !dragTapOn,
           "a button-up of another press passes through and ends the gesture")
     check(repostedClicks.isEmpty && performedActions.isEmpty, "…and neither hands a click back nor runs anything")
@@ -529,6 +531,15 @@ private func testGestureLifecycle() {
     for y in stride(from: CGFloat(504), through: 560, by: 4) { _ = handleRightMouse(.rightMouseDragged, event(.rightMouseDragged, 500, y, press: 11)) }
     check(handleRightMouse(.rightMouseUp, event(.rightMouseUp, 500, 560, press: 11)) && performedActions == [.bottom]
           && repostedClicks.count == 1, "↓ runs its action (bottom) and hands no click back")
+    // Its end: the release point, the gestures begun so far, and the session's location read
+    // from the system then — not the gesture's start (synthetic events never move the session).
+    let e = performedEnds.last, now = CGEvent(source: nil)?.location
+    check(e?.pointer == CGPoint(x: 500, y: 560) && e?.gesturesBegun == gesturesBegun.get(),
+          "the action gets the release point and the count of gestures begun")
+    let gesturePoints = [CGPoint(x: 500, y: 500), CGPoint(x: 500, y: 560)]
+    check(e?.session != nil && (!gesturePoints.contains(e!.session!) || gesturePoints.contains(now ?? .zero)),
+          "the action gets the session's location read at the release, not the gesture's start or release point",
+          "\(String(describing: e?.session))")
     check(tapOffEndsGesture(stillOn: false, buttonHeld: true) && tapOffEndsGesture(stillOn: true, buttonHeld: false)
           && !tapOffEndsGesture(stillOn: true, buttonHeld: true),
           "a tap turned off ends the gesture even with the button held; a timeout with it held does not")
@@ -569,15 +580,28 @@ private func testPageScroll() {
     let wheels = Set(GestureAction.allCases.filter { wheelDelta($0, windowHeight: 900) != nil })
     check(pageKeys == wheels && wheels == [.top, .bottom, .pageUp, .pageDown], "bare page keys scroll by wheel, nothing else",
           "\(pageKeys) \(wheels)")
-    // The wheel event goes where the pointer really is (WindowServer moves the pointer to it):
-    // the session still says the gesture's start until the pointer moves after the release.
+    // The wheel event goes where the pointer really is (WindowServer moves the pointer to it).
+    // The session's location ignores the gesture's swallowed events: while it still says what
+    // it said at the release, the pointer has not moved since and is at the release point.
     let start = CGPoint(x: 1292.7578125, y: 752.1328125), release = CGPoint(x: 1259.8515625, y: 1308.1015625)
-    check(pointerAfterGesture(session: start, start: start, release: release) == release,
-          "pointer not moved since the release: the release point, not the gesture's start")
-    check(pointerAfterGesture(session: CGPoint(x: start.x + 0.2, y: start.y), start: start, release: release) == release,
-          "…however the start is rounded")
+    let end = GestureEnd(pointer: release, session: start, gesturesBegun: 7)
+    func point(_ session: CGPoint?, _ end: GestureEnd, begun: Int = 7, held: Bool = false) -> CGPoint? {
+        wheelPoint(session: session, end: end, gesturesBegun: begun, buttonHeld: held)
+    }
+    check(point(start, end) == release, "pointer not moved since the release: the release point, not the gesture's start")
+    check(point(CGPoint(x: start.x + 0.2, y: start.y), end) == release, "…however it is rounded")
     let moved = CGPoint(x: 1303.5, y: 815.05)
-    check(pointerAfterGesture(session: moved, start: start, release: release) == moved, "pointer moved on since: where it is now")
+    check(point(moved, end) == moved, "pointer moved on since: where it is now")
+    // ← (no wheel) from S0 to R0, then ↑ from R0 without moving: the session still says S0.
+    let s0 = CGPoint(x: 400, y: 300), r1 = CGPoint(x: 300, y: 200)
+    check(point(s0, GestureEnd(pointer: r1, session: s0, gesturesBegun: 2), begun: 2) == r1,
+          "a gesture right after another, without moving between: the release point, not the earlier start")
+    // Where the pointer is not known, the keys go.
+    check(point(start, end, begun: 8) == nil && point(moved, end, begun: 9) == nil,
+          "a later gesture has begun (an action run late): no wheel")
+    check(point(start, end, held: true) == nil, "a button held (a drag or the next gesture under way): no wheel")
+    check(point(nil, end) == nil && point(start, GestureEnd(pointer: release, session: nil, gesturesBegun: 7)) == nil,
+          "the session's location unread, now or at the release: no wheel")
     let window = CGRect(x: 100, y: 100, width: 1200, height: 800)
     check(onPage(CGPoint(x: 600, y: 500), window: window), "wheel over the page")
     check(!onPage(CGPoint(x: 600, y: 150), window: window), "not over the toolbars: the keys go instead")
