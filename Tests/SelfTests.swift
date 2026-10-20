@@ -569,6 +569,15 @@ private func testPageScroll() {
     let wheels = Set(GestureAction.allCases.filter { wheelDelta($0, windowHeight: 900) != nil })
     check(pageKeys == wheels && wheels == [.top, .bottom, .pageUp, .pageDown], "bare page keys scroll by wheel, nothing else",
           "\(pageKeys) \(wheels)")
+    // The wheel event goes where the pointer really is (WindowServer moves the pointer to it):
+    // the session still says the gesture's start until the pointer moves after the release.
+    let start = CGPoint(x: 1292.7578125, y: 752.1328125), release = CGPoint(x: 1259.8515625, y: 1308.1015625)
+    check(pointerAfterGesture(session: start, start: start, release: release) == release,
+          "pointer not moved since the release: the release point, not the gesture's start")
+    check(pointerAfterGesture(session: CGPoint(x: start.x + 0.2, y: start.y), start: start, release: release) == release,
+          "…however the start is rounded")
+    let moved = CGPoint(x: 1303.5, y: 815.05)
+    check(pointerAfterGesture(session: moved, start: start, release: release) == moved, "pointer moved on since: where it is now")
     let window = CGRect(x: 100, y: 100, width: 1200, height: 800)
     check(onPage(CGPoint(x: 600, y: 500), window: window), "wheel over the page")
     check(!onPage(CGPoint(x: 600, y: 150), window: window), "not over the toolbars: the keys go instead")

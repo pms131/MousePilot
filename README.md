@@ -74,6 +74,7 @@ macOS 13 이상이 필요합니다. Apple Silicon과 Intel을 모두 지원합�
 
 - 긋지 않고 오른쪽 클릭만 하면 원래 우클릭 메뉴가 뜹니다. 메뉴는 버튼을 놓을 때 뜹니다.
 - 포커스가 없는 창에서 제스처를 하면 그 창을 앞으로 가져온 뒤 실행합니다.
+- ↑ 맨 위로·↓ 맨 아래로는 커서 아래의 페이지를 스크롤하고, 커서는 그 자리에 둡니다. 동영상 플레이어에 포커스가 있어도 페이지가 움직입니다. 커서가 채팅 창처럼 따로 스크롤되는 영역 위에 있으면 그 영역이 스크롤됩니다.
 - 메뉴의 **마우스 제스처 → 제스처 설정**에서 제스처마다 동작을 고를 수 있습니다. 설정은 `~/.config/mousepilot/gestures`에 저장됩니다.
 - 자체 마우스 제스처가 있는 브라우저(Vivaldi, Opera 등)에는 적용하지 않습니다.
 
@@ -170,6 +171,6 @@ MousePilot switches browser tabs when you scroll the mouse wheel over the tab st
 
 **Install:** download the DMG from [Releases](https://github.com/pms131/MousePilot/releases/latest) and drag MousePilot.app to Applications. Open it, click *Open Anyway* in System Settings → Privacy & Security (the app is not notarized), and grant Accessibility access. The first scroll over a background window, or the first ↓← gesture (open the page in an incognito window), asks once per browser for Automation permission.
 
-**Mouse gestures:** hold the right button over a browser window and draw one or two strokes: left = back, right = forward, down then right = close tab, and so on — 16 gestures, with a trail and the action's name on screen. *Gesture settings…* in the menu shows each gesture's shape and lets you pick its action. Browsers with mouse gestures of their own (Vivaldi, Opera, …) keep them.
+**Mouse gestures:** hold the right button over a browser window and draw one or two strokes: left = back, right = forward, down then right = close tab, and so on — 16 gestures, with a trail and the action's name on screen. Up and down scroll the page under the pointer to the top or bottom, even while a video player has the focus. *Gesture settings…* in the menu shows each gesture's shape and lets you pick its action. Browsers with mouse gestures of their own (Vivaldi, Opera, …) keep them.
 
 **Tips:** the menu bar icon lets you pause, stop at the first and last tab instead of wrapping around, reverse the wheel direction and choose browsers. If tabs cycle in an odd order, turn off Chromium's *"Cycle through the most recently used tabs with Ctrl-Tab"*. Tab strip positions can be adjusted in `~/.config/mousepilot/browsers`.
