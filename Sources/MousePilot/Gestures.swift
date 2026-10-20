@@ -74,7 +74,8 @@ func keyChord(_ action: GestureAction, bundleID: String) -> KeyChord? {
     switch action {
     case .back: return chord(0x21, cmd)                                     // ⌘[
     case .forward: return chord(0x1E, cmd)                                  // ⌘]
-    // Home and End scroll the page even with the caret in a text field (⌘↑/⌘↓ would move it).
+    // Home and End scroll the page even with the caret in a text field (⌘↑/⌘↓ would move it);
+    // a gesture sends them only when it cannot scroll by wheel (see wheelDelta).
     case .top: return chord(0x73, fn)                                       // Home
     case .bottom: return chord(0x77, fn)                                    // End
     case .homepage: return firefox ? chord(0x73, option.union(fn)) : chord(0x04, [cmd, shift])   // ⌥Home / ⌘⇧H
@@ -98,6 +99,31 @@ func keyChord(_ action: GestureAction, bundleID: String) -> KeyChord? {
         return safari ? chord(0x25, [cmd, option]) : firefox ? chord(0x26, cmd) : chord(0x26, [cmd, shift])
     case .none, .maximize: return nil
     }
+}
+
+/// Top, bottom, page up and page down go as one wheel event at the pointer rather than as
+/// Home, End, Page Up or Page Down: a page element with focus takes those keys first — a
+/// YouTube player seeks to the start or the end with Home and End — while a wheel event goes
+/// to what is under the pointer, and a player passes it on to the page. Pixels, + = up; nil
+/// for the other actions.
+func wheelDelta(_ action: GestureAction, windowHeight: CGFloat) -> Int32? {
+    let page = Int32(max(100, (windowHeight - pageTop) * 0.875))   // about what Page Down scrolls
+    switch action {
+    case .top: return wholePage
+    case .bottom: return -wholePage
+    case .pageUp: return page
+    case .pageDown: return -page
+    default: return nil
+    }
+}
+
+let wholePage: Int32 = 10_000_000   // pixels: more than any page; the browser stops at the end
+/// How far below a window's top edge its page may start (tab strip, toolbar, bookmarks bar).
+let pageTop: CGFloat = 120
+
+/// Whether a wheel event at `p` goes to the page of `window` rather than to its toolbars.
+func onPage(_ p: CGPoint, window: CGRect) -> Bool {
+    window.contains(p) && p.y - window.minY >= pageTop
 }
 
 /// The character a menu shows for a shortcut's key (the keys the actions use).
@@ -404,7 +430,7 @@ struct Gesture {
     let press: Int64         // the button press's event number, shared by its button-up
 }
 
-let gestureTag: Int64 = 0x5457_4730   // "TWG0": the right clicks MousePilot hands back
+let gestureTag: Int64 = 0x5457_4730   // "TWG0": the right clicks and page scrolls MousePilot posts
 var activeGesture: Gesture?          // event tap thread only
 
 /// Returns true when the event belongs to a gesture (and must be swallowed).
@@ -549,6 +575,7 @@ final class GestureActions {
             log("gesture: could not bring \(g.browser.bundleID) window \(g.hit.windowID) forward; \(action.rawValue) skipped")
             return
         }
+        if let delta = wheelDelta(action, windowHeight: g.hit.window.height), scrollPage(g.hit, by: delta) { return }
         // Through the browser's menu when it has the command: a page cannot take a menu
         // command the way it takes a shortcut (⌘[ is "decrease indent" in an editor).
         if !goesAsKeys(chord, kind: g.browser.kind), pressMenuItem(g.hit, chord: chord, made: made) { return }
@@ -559,6 +586,20 @@ final class GestureActions {
             e.postToPid(g.hit.pid)
         }
         menuChangedAt[g.hit.pid] = uptime()
+    }
+
+    /// One wheel event at the pointer, when it is over the page of the gesture's window —
+    /// looked at afresh, as the pointer may have moved on; false otherwise (the keys go then).
+    private func scrollPage(_ hit: Hit, by delta: Int32) -> Bool {
+        guard let p = CGEvent(source: nil)?.location, onPage(p, window: hit.window) else { return false }
+        refreshWindows()
+        guard gestureTarget(p, state.get())?.windowID == hit.windowID,
+              let e = CGEvent(scrollWheelEvent2Source: CGEventSource(stateID: .hidSystemState), units: .pixel,
+                              wheelCount: 1, wheel1: delta, wheel2: 0, wheel3: 0) else { return false }
+        e.location = p
+        e.setIntegerValueField(.eventSourceUserData, value: gestureTag)   // no tab switch (handleScroll)
+        e.post(tap: .cgSessionEventTap)
+        return true
     }
 
     private struct MenuKey: Hashable { let pid: pid_t, character: String, modifiers: Int }

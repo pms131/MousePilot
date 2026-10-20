@@ -39,7 +39,7 @@ import CoreGraphics
 import CoreServices
 import ServiceManagement
 
-let appVersion = "1.0.0"   // also the DMG / release version (scripts/build.sh reads this line)
+let appVersion = "1.0.1"   // also the DMG / release version (scripts/build.sh reads this line)
 let defaults = UserDefaults.standard
 let defaultHeight = CGFloat(defaults.object(forKey: "stripHeight") as? Double ?? 40)
 let debug = defaults.bool(forKey: "debug")
@@ -968,7 +968,14 @@ let switcher = TabSwitcher()
 
 // MARK: - Scroll handling (event tap thread)
 
+#if SELFTEST
+var sentTabSteps: [Int] = []   // what would have been posted
+#endif
+
 func sendKeys(to pid: pid_t, steps: Int) {
+    #if SELFTEST
+    sentTabSteps.append(steps)   // self-tests never post keys
+    #else
     let source = CGEventSource(stateID: .hidSystemState)
     let flags: CGEventFlags = steps > 0 ? .maskControl : [.maskControl, .maskShift]
     for _ in 0..<abs(steps) {
@@ -978,6 +985,7 @@ func sendKeys(to pid: pid_t, steps: Int) {
             e.postToPid(pid)
         }
     }
+    #endif
 }
 
 var lastLayoutLog: TimeInterval = 0   // debug: last full layout written to the log
@@ -1042,6 +1050,7 @@ func isFocusedWindow(_ hit: Hit, _ s: State) -> Bool {
 
 /// Returns true when the scroll was used to switch tabs (and must be swallowed).
 func handleScroll(_ event: CGEvent) -> Bool {
+    if event.getIntegerValueField(.eventSourceUserData) == gestureTag { return false }   // a gesture's page scroll
     var s = state.get()
     guard !s.paused, !s.browsers.isEmpty else { return false }
     let p = event.location

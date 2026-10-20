@@ -552,6 +552,45 @@ private func testGestureLifecycle() {
     check(wantedTaps(t) == (false, false), "no browser window proper on screen: both off")
 }
 
+/// Top, bottom and page up/down scroll by wheel, which a focused page element (a video
+/// player) cannot take the way it takes Home and End; MousePilot's own wheel event is no tab switch.
+private func testPageScroll() {
+    let top = wheelDelta(.top, windowHeight: 900), bottom = wheelDelta(.bottom, windowHeight: 900)
+    check((top ?? 0) >= 1_000_000 && bottom == top.map { -$0 }, "top and bottom: one wheel event past any page's end",
+          "\(top.map(String.init) ?? "nil") \(bottom.map(String.init) ?? "nil")")
+    let down = wheelDelta(.pageDown, windowHeight: 900) ?? 0
+    check(wheelDelta(.pageUp, windowHeight: 900) == -down && (-down) > 500 && (-down) < 780,
+          "page up/down: about one page of the window's page area", "\(down)")
+    check(wheelDelta(.pageDown, windowHeight: 150) == -100, "page down in a tiny window: still a step")
+    // Every action whose key a page can take (no ⌘, ⌃ or ⌥: Home, End, Page Up, Page Down)
+    // scrolls by wheel instead; nothing else does.
+    let pageKeys = Set(GestureAction.allCases.filter { a in
+        keyChord(a, bundleID: "com.brave.Browser").map { $0.flags.intersection([.maskCommand, .maskControl, .maskAlternate]).isEmpty } ?? false })
+    let wheels = Set(GestureAction.allCases.filter { wheelDelta($0, windowHeight: 900) != nil })
+    check(pageKeys == wheels && wheels == [.top, .bottom, .pageUp, .pageDown], "bare page keys scroll by wheel, nothing else",
+          "\(pageKeys) \(wheels)")
+    let window = CGRect(x: 100, y: 100, width: 1200, height: 800)
+    check(onPage(CGPoint(x: 600, y: 500), window: window), "wheel over the page")
+    check(!onPage(CGPoint(x: 600, y: 150), window: window), "not over the toolbars: the keys go instead")
+    check(!onPage(CGPoint(x: 1400, y: 500), window: window), "not outside the window")
+
+    // The tab strip takes the user's wheel, never MousePilot's own.
+    var s = layout([w(1, brave, 100, 100, 1200, 800)], standard: [brave: [1]])
+    s.windowsTime = uptime()
+    s.frontPID = brave
+    s.focused[brave] = FocusedWindow(frame: nil, id: 1)
+    s.wrap = true
+    state.update { $0 = s }
+    sentTabSteps = []
+    let own = scroll(lines: -1)
+    own.location = CGPoint(x: 300, y: 120)
+    own.setIntegerValueField(.eventSourceUserData, value: gestureTag)
+    check(!handleScroll(own) && sentTabSteps.isEmpty, "MousePilot's own page scroll over the tab strip switches no tab")
+    let user = scroll(lines: -1)
+    user.location = CGPoint(x: 300, y: 120)
+    check(handleScroll(user) && sentTabSteps == [1], "the user's wheel there does", "\(sentTabSteps)")
+}
+
 func runSelfTests() -> Int {
     testHitTest()
     testRouting()
@@ -565,6 +604,7 @@ func runSelfTests() -> Int {
     testGestures()
     testGestureTarget()
     testGestureLifecycle()
+    testPageScroll()
     print("self-test: \(passed) passed, \(failures) failed")
     return failures
 }
