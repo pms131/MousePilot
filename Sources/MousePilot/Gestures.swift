@@ -1055,6 +1055,29 @@ final class GestureOverlay {
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
+    /// Closes both panels; the next gesture makes new ones. After the displays change — all of
+    /// them gone during sleep, then one back — the old panels can stay off screen for good:
+    /// WindowServer ignores orderFrontRegardless for them (seen 2026-10-23, the trail resized
+    /// with every gesture yet never on screen), while new panels show. Main thread.
+    func discardPanels() {
+        hide()
+        let ids = [trail, hud].compactMap { $0?.windowNumber }.map { CGWindowID($0) }
+        for panel in [trail, hud].compactMap({ $0 }) { panel.close() }
+        // Still left out of the window cache a while: a window list read on another thread just
+        // before WindowServer took them away would otherwise count them as windows in front.
+        if !ids.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { overlayWindowIDs.update { $0.subtract(ids) } }
+        }
+        settled.removeFromSuperlayer()
+        recent.removeFromSuperlayer()
+        arrowsLabel.removeFromSuperview()
+        titleLabel.removeFromSuperview()
+        trail = nil
+        hud = nil
+        shown = ("", "", .null)
+        if gestureDrawing.get().visible { render() }   // mid-gesture: drawn again at once, on new panels
+    }
+
     /// Hides both panels; the trail's shrinks to a point so its backing store goes too.
     private func hide() {
         settled.path = nil

@@ -64,8 +64,50 @@ func runOverlayTest() -> Never {
         }
         endDrawing()
         usleep(300_000)
+        var before = Set<CGWindowID>()
         DispatchQueue.main.sync {
             expect(panelsOnScreen().isEmpty, "both panels are gone after the gesture", "\(panelsOnScreen())")
+            // After the displays change the panels are thrown away; the next gesture makes new
+            // ones, and they reach the screen.
+            before = overlayWindowIDs.get()
+            gestureOverlay.discardPanels()
+            expect(overlayWindowIDs.get() == before, "discarded panels stay out of the window cache a while")
+        }
+        usleep(1_300_000)
+        DispatchQueue.main.sync {
+            expect(overlayWindowIDs.get().isEmpty, "…then the window cache forgets them", "\(overlayWindowIDs.get())")
+        }
+        p = start
+        beginDrawing(at: p, window: window, stroke: true, title: true)
+        g = Gesture(tracker: GestureTracker(at: p), hit: hit, browser: browser, focused: true,
+                    map: whaleGestures, flags: [], start: p, press: 0)
+        for _ in 0..<120 {   // down 120 pt: "D"
+            p = CGPoint(x: p.x, y: p.y + 1)
+            let changed = g.tracker.move(to: p)
+            draw(g, at: p, changed: changed)
+            usleep(1000)
+        }
+        usleep(300_000)
+        var shownIDs = Set<CGWindowID>()
+        DispatchQueue.main.sync {
+            let ids = overlayWindowIDs.get()
+            shownIDs = ids
+            expect(panelsOnScreen().count == 2 && ids.count == 2 && ids.isDisjoint(with: before),
+                   "after the panels are discarded, the next gesture shows new ones", "\(panelsOnScreen()) \(ids) \(before)")
+            // Discarded in the middle of a gesture (the displays changed): drawn again at once on
+            // new panels, without waiting for the pointer to move.
+            gestureOverlay.discardPanels()
+        }
+        usleep(300_000)
+        DispatchQueue.main.sync {
+            let ids = overlayWindowIDs.get().subtracting(shownIDs)
+            expect(panelsOnScreen().count == 2 && ids.count == 2,
+                   "discarded mid-gesture: trail and title back at once on new panels", "\(panelsOnScreen()) \(ids)")
+        }
+        endDrawing()
+        usleep(300_000)
+        DispatchQueue.main.sync {
+            expect(panelsOnScreen().isEmpty, "…and hides them after it", "\(panelsOnScreen())")
             print("overlay test: \(failures == 0 ? "trail and title shown, then hidden" : "\(failures) failed")")
             exit(failures)
         }

@@ -39,7 +39,7 @@ import CoreGraphics
 import CoreServices
 import ServiceManagement
 
-let appVersion = "1.0.1"   // also the DMG / release version (scripts/build.sh reads this line)
+let appVersion = "1.0.2"   // also the DMG / release version (scripts/build.sh reads this line)
 let defaults = UserDefaults.standard
 let defaultHeight = CGFloat(defaults.object(forKey: "stripHeight") as? Double ?? 40)
 let debug = defaults.bool(forKey: "debug")
@@ -1536,11 +1536,13 @@ workspace.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, que
     refreshDisplays()
     refreshAllWindows()
     updateTapState()
+    gestureOverlay.discardPanels()   // displays may have come and gone meanwhile
 }
 NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                        object: nil, queue: .main) { _ in
     refreshDisplays()
     refreshAllWindows()
+    gestureOverlay.discardPanels()   // panels from before can stay off screen for good
 }
 
 if defaults.bool(forKey: "gestureDemo") { installGestureDemo() }   // scripts/check.sh's debuggable copy
